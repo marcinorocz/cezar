@@ -1,0 +1,17 @@
+name: variants-with-arbitration
+description: Run competing implementation variants and synthesize an executive 4-Act Decision Card
+steps:
+  - id: variant-a
+    name: Implementation Variant A
+    prompt: "{{task}}"
+    skill: l0-preflight-guard
+  - id: verify-a
+    name: Verify Variant A
+    command: "npm test"
+    onFail:
+      retry: variant-a
+      max: 2
+  - id: synthesize
+    name: 4-Act Decision Synthesis
+    prompt: "Compare Variant A with baseline and synthesize the 4-Act Decision Card for review."
+    skill: decision-synthesizer

@@ -8,7 +8,11 @@ dist/
 /packages/cezar/README.md
 
 # cezar runtime state in this repo (runs, worktrees, launch-key)
-.ai/cezar/
+.ai/cezar/*
+!.ai/cezar/workflows/
+!.ai/cezar/workflows/**
+!.ai/cezar/skills/
+!.ai/cezar/skills/**
 
 # locally installed agent skills (per-machine installs, not repo content)
 .agents/
