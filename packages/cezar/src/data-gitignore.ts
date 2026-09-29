@@ -43,6 +43,8 @@ export const DATA_GITIGNORE_ENTRIES = [
   'automation-receipts.ndjson.tmp',
   'automation-log.ndjson',
   'automation-log.ndjson.tmp',
+  'learnings.jsonl',
+  'learnings.jsonl.tmp',
   'automation-poll.lock',
   'automation-poll.lock.guard/',
   'automation-mutation.lock.guard/',
