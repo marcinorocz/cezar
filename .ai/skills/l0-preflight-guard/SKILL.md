@@ -1,86 +1,101 @@
 ---
 name: l0-preflight-guard
-description: Pre-flight security & privacy gate ensuring deterministic regex sanitization, strict rule precedence, external allowlists, and credential isolation.
+description: Pre-flight security & privacy gate with strict token placeholder redaction, deterministic truth table, and fail-closed credential blocking.
 ---
 
 # L0 Pre-Flight Security & Privacy Guard
 
-Use this skill before dispatching prompts or committing changes to ensure total protection of sensitive assets, credential isolation, and verification honesty.
+## 1. Problem Statement
+When dispatching prompts to LLM vendor runners or committing changes, tools and developers risk leaking sensitive secrets, credentials, API keys, or customer Personal Identifiable Information (PII). Relying on model "good behavior" or fuzzy prompts to keep data confidential is unsafe. Sanitization must be an uncompromising, deterministic pre-flight filter operating prior to prompt departure.
 
-## 1. Core Architectural Invariant: 100% Deterministic Regex Gate (No LLM Classifier)
-- **Zero LLM Delegation:** PII and credential sanitization must be 100% deterministic (code, AST, and regex rule-based). Classification must NEVER be delegated to a language model — LLMs are non-deterministic, untestable against truth tables, and cannot guarantee cryptographic safety boundaries.
-- **Adversarial Normalization:** Before pattern matching, text undergoes Unicode NFKC normalization to collapse homoglyphs and unescape obvious URL/percent-encoded payloads.
+---
 
-## 2. Strict Rule Precedence Hierarchy
-When evaluating text, rules execute in rigid hierarchical order. A higher-priority match immediately determines or short-circuits the action:
+## 2. Hard Security Policy & Invariants
+- **Deterministic Code-Level Gate:** Sanitization is executed by deterministic parsers and regex patterns before network dispatch. Never delegate PII/secret classification to an LLM.
+- **Fail-Closed on Credentials:** Any matched credential, session token, private key, or API key causes immediate prompt abortion (`block`). Credentials can NEVER be whitelisted or bypassed via an escape hatch.
+- **Predictable Placeholder Masking:** Detected PII items are substituted with sequential tokens:
+  - Emails: `EMAIL_001`, `EMAIL_002`, ...
+  - Phone numbers: `PHONE_001`, ...
+  - Names / SSN / National IDs: `ID_001`, ...
+  - Generic Secrets / Tokens: `TOKEN_001`, `SECRET_001`, ...
+- **Local Secret Mapping:** The mapping table (`EMAIL_001 -> real@corp.com`) is retained strictly in volatile local memory or ephemeral local storage. It is NEVER transmitted upstream, written to shared transcripts, or included in outgoing payloads.
+- **Safe Escape Hatch:** Only explicit, user-configured allowlists with documented reasons and audit trails may exempt known non-secret fixtures. There is NO default "looks safe" bypass.
 
-```
-[CRED-01: Raw Credentials]  --> ALWAYS BLOCK (No escape hatch ever)
-       │ (clean)
-       ▼
-[PII-01: High-Risk Identifiers (PESEL, SSN, Credit Card)] --> REDACT or BLOCK
-       │ (clean or unblocked)
-       ▼
-[HOST-01: Benign Git / Author Whitelist] --> PASS (Preserve git metadata)
-       │ (unmatched)
-       ▼
-[PII-02: Contextual PII (Email, Phone)] --> REDACT (or PASS_LOGGED if valid hatch)
-       │ (clean)
-       ▼
-[ALLOW-01: External Allowlist & Synthetic Fixture Hatch] --> PASS_LOGGED (Audited)
-```
+---
 
-## 3. Pre-Prompt Sanitization & Truth Table
-The guard is a pure function: `(text, policy, hatch?) -> Decision`. Fail-closed: any detector error results in immediate `block`.
+## 3. Decision Truth Table (When to Block / When to Allow)
 
-| Credential Match | Strict PII Match | Contextual PII Match | Valid External Hatch | Gate Action | Result Type |
-|:---:|:---:|:---:|:---:|:---:|:---|
-| **Yes** | Any | Any | Any | `block` | Hard rejection (`reasonCode: 'credential'`) |
-| **No** | **Yes** | Any | No | `redact` / `block` | Replace with stable token or block |
-| **No** | **No** | **Yes** | No | `redact` | Replaced with stable placeholders (e.g. `[PII:EMAIL:1]`) |
-| **No** | **No** | **Yes** | Yes (`allowPii` + reason) | `pass_logged` | Original text passed; audit count logged without raw values |
-| **No** | **No** | **No** | N/A | `pass` | Clean original text sent |
-| **Detector Error** | Any | Any | Any | `block` | Fail-closed (`reasonCode: 'detector_error'`) |
+| Payload Content Type | Example Pattern | Gate Action | Prompt State | Logging / Escalation |
+|---|---|:---:|:---:|---|
+| **Public / Safe Value** | Generic code, standard docs, open repo text | **ALLOW** | Original unchanged | No alert |
+| **Benign Git / Dev Identity** | `git log --author`, `package.json` author, `CODEOWNERS` | **ALLOW** | Original unchanged | Whitelisted developer context |
+| **Contextual PII** | Email addresses, phone numbers | **REDACT** | Replaced with `EMAIL_001`, `PHONE_001` | Map stored locally only |
+| **High-Risk PII / National ID** | PESEL, SSN, Credit card numbers | **REDACT + WARN** | Replaced with `ID_001` | Log finding count in audit |
+| **Credentials & Auth Tokens** | AWS Key (`AKIA*`), GitHub Token (`ghp_*`), OpenAI (`sk-*`), JWT, SSH private keys | **BLOCK** | **Aborted** (Prompt not sent) | Immediate rejection error: `reasonCode: 'credential'` |
+| **Unknown Secret-Like String** | High-entropy hex/base64 blobs in sensitive fields | **BLOCK & ESCALATE** | **Aborted** (Prompt not sent) | Escalated to developer for explicit allowlisting |
+| **Explicitly Whitelisted Fixture** | Test token in synthetic fixture with valid config flag | **ALLOW_AUDITED** | Original passed | Recorded in local audit log with reason tag |
 
-### Stable Placeholders & Git Identity Whitelist
-- **Predictable Tokens:** PII masking generates deterministic tokens (e.g. `[PII:EMAIL:1]`, `[PII:PHONE:1]`), preserving structural syntax for coding agents without corrupting semantics.
-- **HOST-01 Benign Whitelist:** Standard benign email metadata (`git commit --author`, `Co-Authored-By:`, `package.json`, `CODEOWNERS`) is whitelisted from PII blocking.
+---
 
-### Secure Escape Hatch (External Auth Only)
-- **Prompt Injection Defense:** Escape hatches can NEVER be triggered solely by inline prompt instructions (e.g. an agent writing "ignore PII filter"). They require external authorization (environment flag `CEZ_ALLOW_SYNTHETIC_FIXTURES=1`, signed run parameter, or explicit UI composer toggle) accompanied by an audit reason and destination allowlist.
+## 4. Operational Checklist & Pseudocode
 
-### Pure Function Interface (TypeScript)
+### Pre-Flight Checklist
+- [ ] 1. Text normalized using Unicode NFKC (homoglyph attack prevention).
+- [ ] 2. High-priority scan for raw credentials (`CRED-01`). If found -> **HALT IMMEDIATELY**.
+- [ ] 3. Check for high-entropy secret-like strings. If unwhitelisted -> **HALT AND ESCALATE**.
+- [ ] 4. Whitelist check for repository metadata (`git commit --author`, etc.).
+- [ ] 5. Mask contextual PII into sequential tokens (`EMAIL_001`, `PHONE_001`).
+- [ ] 6. Ensure token map is stored strictly in ephemeral local memory.
+- [ ] 7. Dispatch sanitized prompt payload.
+
+### Pure Function Implementation Pattern
 ```ts
-export type PreflightDecision =
-  | { action: 'pass' }
-  | { action: 'redact'; text: string; findings: readonly Finding[] }
-  | { action: 'pass_logged'; findings: readonly Finding[]; reason: string }
-  | { action: 'block'; reasonCode: 'credential' | 'detector_error' | 'strict_pii' };
+export interface SanitizationResult {
+  action: 'ALLOW' | 'REDACT' | 'BLOCK' | 'BLOCK_AND_ESCALATE';
+  sanitizedPrompt?: string;
+  localTokenMap?: Record<string, string>;
+  reason?: string;
+}
 
-export function preflight(text: string, policy: Policy, hatch?: ExternalHatch): PreflightDecision {
-  let f: Findings;
-  try {
-    const normalized = normalizeAdversarial(text);
-    f = detectDeterministic(normalized, policy);
-  } catch {
-    return { action: 'block', reasonCode: 'detector_error' };
+export function sanitizePreFlightPrompt(
+  rawPrompt: string,
+  allowlist: Set<string> = new Set()
+): SanitizationResult {
+  const normalized = rawPrompt.normalize('NFKC');
+
+  // Step 1: Detect hard credentials (Zero-tolerance)
+  const credentialHits = detectCredentials(normalized);
+  if (credentialHits.length > 0) {
+    return {
+      action: 'BLOCK',
+      reason: `Found raw credentials: ${credentialHits.map(h => h.type).join(', ')}. Dispatch aborted.`
+    };
   }
-  // CRED-01: Absolute precedence
-  if (f.credentials.length > 0) return { action: 'block', reasonCode: 'credential' };
-  // PII-01 & PII-02
-  if (f.pii.length === 0) return { action: 'pass' };
-  if (hatch && isExternalHatchAuthorized(hatch, policy)) {
-    return { action: 'pass_logged', findings: f.pii, reason: hatch.reason };
+
+  // Step 2: Detect unknown high-entropy secret-like strings
+  const suspiciousBlobs = detectHighEntropyBlobs(normalized);
+  const unwhitelistedBlobs = suspiciousBlobs.filter(b => !allowlist.has(b.hash));
+  if (unwhitelistedBlobs.length > 0) {
+    return {
+      action: 'BLOCK_AND_ESCALATE',
+      reason: 'Unknown secret-like tokens detected. Requires explicit allowlisting with justification.'
+    };
   }
-  return { action: 'redact', text: redactDeterministic(text, f.pii), findings: f.pii };
+
+  // Step 3: Redact contextual PII into stable placeholders
+  const tokenMap: Record<string, string> = {};
+  let counter = 1;
+  const sanitized = normalized.replace(PII_EMAIL_REGEX, (match) => {
+    if (isGitIdentityContext(match, normalized)) return match;
+    const placeholder = `EMAIL_${String(counter++).padStart(3, '0')}`;
+    tokenMap[placeholder] = match;
+    return placeholder;
+  });
+
+  return {
+    action: counter > 1 ? 'REDACT' : 'ALLOW',
+    sanitizedPrompt: sanitized,
+    localTokenMap: tokenMap
+  };
 }
 ```
-
-## 4. First-Turn Task Ingestion & Auxiliary Leaks
-- Protect both the main task prompt and auxiliary runner calls:
-  - `workflows/run.ts` auto-naming and `runs/auto-name.ts`: Do not dispatch unredacted text to LLM-based title generators. Fall back to deterministic slug `task-<id8>` if sensitive content is present.
-
-## 5. Verification Honesty
-- Clearly differentiate:
-  - `[EXECUTED]`: Commands that genuinely ran on disk with verifiable exit code 0 and captured output in the transcript.
-  - `[REASONED]`: Analytical deduction or code inspection. Never claim test execution without verifiable execution logs.
