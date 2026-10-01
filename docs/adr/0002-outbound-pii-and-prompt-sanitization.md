@@ -17,14 +17,28 @@ To remain architecturally honest:
 
 ## Decision
 
-### 1. Rejection Gate over Silent Destructive Redaction
+### 1. Deterministic Architecture Invariant (Zero LLM Delegation)
+Sanitization and detection are **100% deterministic (code, AST, and regex rule-based)**.
+- **Why No LLM Classifier:** Classifying PII via an LLM classifier is non-deterministic, untestable against formal truth tables, susceptible to prompt injection, and incurs unacceptable latency and cost on every prompt dispatch.
+- **Adversarial Normalization:** Inbound text is normalized via Unicode NFKC before evaluation to eliminate lookalike homoglyphs and unescape known URL-encoded tokens.
+
+### 2. Strict Rule Precedence Hierarchy
+Rules evaluate strictly in descending order of sensitivity. High-priority violations short-circuit execution:
+
+1. **`CRED-01` (Credentials & Secret Tokens):** Hard rejection. Escape hatches NEVER apply to credentials.
+2. **`PII-01` (High-Risk Identifiers: National IDs, Credit Cards):** Rejection or masking.
+3. **`HOST-01` (Git / Author Identity Whitelist):** Whitelists standard developer metadata (`git commit --author`, `Co-Authored-By:`, `package.json`, `CODEOWNERS`).
+4. **`PII-02` (Contextual PII: Email, Phone):** Redaction or rejection.
+5. **`ALLOW-01` (External Allowlist & Synthetic Fixture Hatch):** Pass with audit log.
+
+### 3. Rejection Gate over Silent Destructive Redaction
 Blindly replacing email addresses or identifiers with `[REDACTED]` in task prompts causes severe semantic degradation (e.g. `git log --author=alice@corp.com` becomes `git log --author=[REDACTED]`).
 Therefore, the first-turn outbound guard functions as a **Validation / Rejection Gate**:
 - When an actionable violation is detected, task dispatch fails closed with a clear error:
   `"Task contains raw credentials or PII; please remove before dispatch."`
 - In the cockpit web composer, this surfaces as an inline validation error preventing queueing.
 
-### 2. Guard Semantics & Flag Truth Table
+### 4. Guard Semantics & Flag Truth Table
 The guard strictly adheres to the following truth table:
 
 | `CEZ_REDACT_SECRETS` | `CEZ_REDACT_PII` | PII Match | Secret Match | Gate Action |
@@ -38,14 +52,15 @@ The guard strictly adheres to the following truth table:
 | **0** | **1** | Yes | Ignored | **REJECT** (PII scan active, secrets bypassed) |
 
 - **One Token Pattern List:** The dispatch gate reuses the exact `TOKEN_PATTERNS` from `packages/cezar/src/core/secret-redaction.ts` so inbound scrubbing and outbound rejection cannot drift apart.
-- **Git Identity Whitelist:** Standard benign email occurrences (`git commit --author`, `Co-Authored-By:`, `package.json` author, and `CODEOWNERS`) are whitelisted from triggering PII rejection.
 
-### 3. Escape Hatch for Test Fixtures (Documented Limitation)
+### 5. Secure External Escape Hatch (Prompt Injection Defense)
 To avoid false-positive claims: synthetic token strings present in test fixtures (such as `secret-redaction.test.ts`) would naturally trigger rejection on tasks aimed at modifying them.
-- Rather than coupling to `CEZ_REDACT_SECRETS=0` (which dangerously disables transcript scrubbing), a dedicated flag `CEZ_ALLOW_SYNTHETIC_FIXTURES=1` bypasses outbound dispatch rejection while keeping inbound transcript redaction fully intact.
-- Prompts can also include local inline ignore pragmas (e.g. `// cezar-allow-mock-token`).
+- **External Authorization Only:** Escape hatches can NEVER be commanded by text within the prompt body alone (which would allow prompt-injected overrides). They require external authorization via:
+  1. Environment variable: `CEZ_ALLOW_SYNTHETIC_FIXTURES=1`, or
+  2. Explicit cockpit composer toggle with structured audit justification.
+- When active, the bypass applies strictly to test fixtures; transcript redaction remains 100% active on disk.
 
-### 4. Attestation Separation
+### 6. Attestation Separation
 Report honesty and `[EXECUTED]` vs `[REASONED]` verification are orthogonal to credential sanitization and are tracked in proposal #1155.
 
 ## Consequences
